@@ -119,7 +119,7 @@ class NIHChestXrayDataset(Dataset):
 
         target = labels_to_multihot(row["Finding Labels"], self.class_list,
                                     drop_no_finding=self.drop_no_finding)
-        return image, target, img_name
+        return image, target, img_path
 
 
 def default_transforms(img_size: int = 224):

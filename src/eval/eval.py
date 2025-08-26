@@ -1,6 +1,6 @@
 from typing import Dict, List, Sequence
 from PIL import Image, ImageDraw, ImageFont
-from sklearn.metrics import roc_auc_score, average_precision_score, precision_recall_curve, precision_score, recall_score, roc_curve, auc
+from sklearn.metrics import roc_auc_score, average_precision_score, precision_recall_curve, precision_score, recall_score, roc_curve, auc, accuracy_score
 
 import numpy as np
 import pandas as pd
@@ -15,68 +15,81 @@ NIH14_CLASSES = [
 ]
 
 
-def compute_metrics(y_true: np.ndarray, y_prob: np.ndarray) -> Dict[str, float]:
-    """Compute AUROC and AUPRC (AP) metrics for multilabel classification.
+def compute_metrics(y_true: np.ndarray, y_prob: np.ndarray, threshold: float = 0.5) -> Dict[str, float]:
+    """Compute AUROC, AUPRC (AP), and accuracy metrics for multilabel classification.
     
     Args:
         y_true: (N, C) binary ground-truth labels
         y_prob: (N, C) predicted probabilities
+        threshold: cutoff for turning probabilities into binary predictions
     
     Returns:
-        dict with macro/micro AUROC, macro/micro AUPRC, and per-class metrics
+        dict with macro/micro AUROC, macro/micro AUPRC, accuracies, and per-class metrics
     """
     out = {}
-    try:
-        C = y_true.shape[1]
-        aurocs, aps = [], []
+    C = y_true.shape[1]
+    aurocs, aps, accs = [], [], []
 
-        # ---- Per-class metrics ----
-        for c in range(C):
-            yt, yp = y_true[:, c], y_prob[:, c]
-            if yt.max() > 0 and yt.min() == 0:  # class has both positives and negatives
-                aurocs.append(roc_auc_score(yt, yp))
-                aps.append(average_precision_score(yt, yp))
-            else:
-                aurocs.append(np.nan)
-                aps.append(np.nan)
+    # ---- Per-class metrics ----
+    for c in range(C):
+        yt, yp = y_true[:, c], y_prob[:, c]
+        yhat = (yp > threshold).astype(int)
 
-        # Macro averages
-        out["auroc_macro"] = np.nanmean(aurocs)
-        out["map_macro"]   = np.nanmean(aps)
+        if yt.max() > 0 and yt.min() == 0:  # class has both positives and negatives
+            aurocs.append(roc_auc_score(yt, yp))
+            aps.append(average_precision_score(yt, yp))
+            accs.append(accuracy_score(yt, yhat))
+        else:
+            aurocs.append(np.nan)
+            aps.append(np.nan)
+            accs.append(np.nan)
 
-        # Micro averages (treat all (sample,class) pairs as flat binary tasks)
-        out["auroc_micro"] = roc_auc_score(y_true.ravel(), y_prob.ravel())
-        out["map_micro"]   = average_precision_score(y_true.ravel(), y_prob.ravel())
+    # ---- Macro averages ----
+    out["auroc_macro"] = np.nanmean(aurocs)
+    out["map_macro"]   = np.nanmean(aps)
+    out["acc_macro"]   = np.nanmean(accs)
 
-        # Store per-class results too
-        out["auroc_per_class"] = dict(zip(NIH14_CLASSES, aurocs))
-        out["map_per_class"]   = dict(zip(NIH14_CLASSES, aps))
+    # ---- Micro averages (flatten all sample,class pairs) ----
+    yhat_all = (y_prob > threshold).astype(int)
+    out["auroc_micro"] = roc_auc_score(y_true.ravel(), y_prob.ravel())
+    out["map_micro"]   = average_precision_score(y_true.ravel(), y_prob.ravel())
+    out["acc_micro"]   = accuracy_score(y_true.ravel(), yhat_all.ravel())
 
-    except Exception as e:
-        # ---- Fallback: manual AP computation ----
-        def simple_ap(y, p):
-            order = np.argsort(-p)
-            y = y[order]
-            cum_tp = np.cumsum(y)
-            precision = cum_tp / (np.arange(len(y)) + 1)
-            recall = cum_tp / max(1, y.sum())
-            ap = 0.0
-            for i in range(1, len(y)):
-                ap += precision[i] * (recall[i] - recall[i-1])
-            return ap
+    # ---- Exact match accuracy (strict) ----
+    out["acc_exact_match"] = (yhat_all == y_true).all(axis=1).mean()
 
-        C = y_true.shape[1]
-        aps = []
-        for c in range(C):
-            yt, yp = y_true[:, c], y_prob[:, c]
-            if yt.max() > 0 and yt.min() == 0:
-                aps.append(simple_ap(yt, yp))
-            else:
-                aps.append(np.nan)
-        out["map_macro"] = np.nanmean(aps)
-        out["map_per_class"] = dict(zip(range(C), aps))
+    # ---- Per-class results ----
+    out["auroc_per_class"] = dict(zip(NIH14_CLASSES, aurocs))
+    out["map_per_class"]   = dict(zip(NIH14_CLASSES, aps))
+    out["acc_per_class"]   = dict(zip(NIH14_CLASSES, accs))
 
     return out
+
+    # except Exception as e:
+    #     # ---- Fallback: manual AP computation ----
+    #     def simple_ap(y, p):
+    #         order = np.argsort(-p)
+    #         y = y[order]
+    #         cum_tp = np.cumsum(y)
+    #         precision = cum_tp / (np.arange(len(y)) + 1)
+    #         recall = cum_tp / max(1, y.sum())
+    #         ap = 0.0
+    #         for i in range(1, len(y)):
+    #             ap += precision[i] * (recall[i] - recall[i-1])
+    #         return ap
+
+    #     C = y_true.shape[1]
+    #     aps = []
+    #     for c in range(C):
+    #         yt, yp = y_true[:, c], y_prob[:, c]
+    #         if yt.max() > 0 and yt.min() == 0:
+    #             aps.append(simple_ap(yt, yp))
+    #         else:
+    #             aps.append(np.nan)
+    #     out["map_macro"] = np.nanmean(aps)
+    #     out["map_per_class"] = dict(zip(range(C), aps))
+
+    # return out
 
 def find_optimal_thresholds(y_true: np.ndarray, y_prob: np.ndarray, beta: float = 1.0) -> np.ndarray:
     """

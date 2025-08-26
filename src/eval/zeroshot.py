@@ -84,3 +84,33 @@ def zeroshot_on_loader(vlp, loader, classes=NIH14_CLASSES, alpha=0.5, tokenizer=
     y_prob = np.concatenate(all_probs, axis=0)
     y_true = np.concatenate(all_targets, axis=0)
     return y_true, y_prob
+
+@torch.no_grad()
+def zeroshot_on_biovil(vlp, loader, classes=NIH14_CLASSES, alpha=0.5, tokenizer=None, device="cpu"):
+    # Choose centroid builder based on whether tokenizer is provided
+    if tokenizer is not None:
+        pos_c, neg_c = build_tokenized_text_centroids(vlp, tokenizer, classes, device=device)
+    else:
+        pos_c, neg_c = build_text_centroids(vlp, classes)
+
+    all_probs, all_targets = [], []
+    for batch in loader:
+        if isinstance(batch, (list, tuple)):
+            image_path, targets = batch[2], batch[1]
+        else:
+            image_path, targets = batch["img_path"], batch["labels"]
+
+        # pixel_values = images.to(device)
+        img_z = vlp.encode_image(image_path)    # [B,D]
+
+        s_pos = img_z @ pos_c.T
+        s_neg = img_z @ neg_c.T
+        logits = alpha * s_pos + (1 - alpha) * (-s_neg)
+        probs = torch.sigmoid(logits).cpu().numpy()
+
+        all_probs.append(probs)
+        all_targets.append(targets.cpu().numpy())
+
+    y_prob = np.concatenate(all_probs, axis=0)
+    y_true = np.concatenate(all_targets, axis=0)
+    return y_true, y_prob

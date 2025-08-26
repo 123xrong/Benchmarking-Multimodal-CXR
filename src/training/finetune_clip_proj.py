@@ -582,3 +582,111 @@ def finetune_convirt_projection(
         gc.collect(); torch.cuda.empty_cache()
 
     return model, best
+
+def finetune_biovil_projection(
+    model, train_loader, val_loader, test_loader=None,
+    classes=NIH14_CLASSES,
+    train_text=False,          # <- allow unfreezing text projection too
+    train_logit_scale=False,   # <- optional if BioViL has logit_scale
+    epochs=3,
+    lr_proj=1e-4,              # learning rate for projections
+    lr_alpha=1e-3,             # learning rate for scalar α
+    weight_decay=5e-2,
+    pos_weight=None,
+    save_path=None):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # ---- Freeze everything first ----
+    for p in model.parameters():
+        p.requires_grad = False
+
+    # ---- Unfreeze chosen parts ----
+    train_params = []
+    if hasattr(model, "visual_projection"):
+        for p in model.visual_projection.parameters():
+            p.requires_grad = True; train_params.append(p)
+    if train_text and hasattr(model, "text_projection"):
+        for p in model.text_projection.parameters():
+            p.requires_grad = True; train_params.append(p)
+    if train_logit_scale and hasattr(model, "logit_scale"):
+        model.logit_scale.requires_grad_(True)
+        train_params.append(model.logit_scale)
+
+    # ---- Learnable temperature α ----
+    alpha = nn.Parameter(torch.tensor(10.0, device=device))
+    train_params.append(alpha)
+
+    # ---- Optimizer / Scheduler ----
+    optim = torch.optim.AdamW([
+        {"params": [p for p in train_params if p is not alpha], "lr": lr_proj, "weight_decay": weight_decay},
+        {"params": [alpha], "lr": lr_alpha, "weight_decay": 0.0},
+    ])
+    scaler = GradScaler(enabled=torch.cuda.is_available())
+    bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight.to(device) if pos_weight is not None else None)
+
+    best_val, best = -np.inf, None
+
+    for ep in range(1, epochs+1):
+        # ---- Train ----
+        model.train()
+        running, seen = 0.0, 0
+        for images, targets, paths in train_loader:
+            targets = targets.to(device).float()
+            optim.zero_grad(set_to_none=True)
+
+            # recompute text centroids inside graph if text side is trainable
+            if train_text:
+                pos_c, neg_c = text_centroids_grad(model, classes)
+            else:
+                with torch.no_grad():
+                    pos_c, neg_c = text_centroids_nograd(model, classes)
+                pos_c, neg_c = pos_c.to(device), neg_c.to(device)
+
+            with autocast(enabled=torch.cuda.is_available()):
+                img_z = model.encode_image(paths)   # grads flow if visual_projection is trainable
+                s_pos, s_neg = img_z @ pos_c.T, img_z @ neg_c.T
+                logits = alpha * (s_pos - s_neg)
+                loss = bce(logits, targets)
+
+            scaler.scale(loss).backward()
+            scaler.step(optim); scaler.update()
+            running += loss.item() * images.size(0)
+            seen += images.size(0)
+
+        train_loss = running / max(1, seen)
+
+        # ---- Validation ----
+        all_prob, all_true = [], []
+        model.eval()
+        with torch.no_grad():
+            pos_c, neg_c = text_centroids_nograd(model, classes)
+            pos_c, neg_c = pos_c.to(device), neg_c.to(device)
+            for _, targets, paths in val_loader:
+                targets = targets.to(device)
+                img_z = model.encode_image(paths)
+                probs = torch.sigmoid(alpha * (img_z @ pos_c.T - img_z @ neg_c.T))
+                all_prob.append(probs.cpu().numpy())
+                all_true.append(targets.cpu().numpy())
+
+        y_prob_val = np.concatenate(all_prob, axis=0)
+        y_true_val = np.concatenate(all_true, axis=0)
+
+        val_metrics = compute_metrics(y_true_val, y_prob_val)
+        score = (val_metrics.get("map_macro", 0.0) + val_metrics.get("auroc_macro", 0.0)) / 2.0
+
+        print(f"[biovil-ft] epoch {ep}/{epochs} train_loss={train_loss:.4f} "
+              f"AUROC_macro={val_metrics['auroc_macro']:.4f} mAP_macro={val_metrics['map_macro']:.4f}")
+
+        if score > best_val:
+            best_val = score
+            best = {
+                "epoch": ep,
+                "alpha": float(alpha.detach().cpu()),
+                "val_metrics": val_metrics,
+                "state_dict": model.state_dict(),
+                "train_text": train_text,
+            }
+            if save_path:
+                torch.save(best, save_path)
+
+    return best
