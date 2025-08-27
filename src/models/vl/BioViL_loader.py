@@ -42,8 +42,8 @@ def build_biovil_t(device) -> "BioViLT":
             self.device = torch.device(device)
 
             # Example: add trainable projection heads if needed
-            self.visual_projection = nn.Identity()   # replace with nn.Linear(dim, dim) if needed
-            self.text_projection   = nn.Identity()   # same as above
+            self.visual_projection = nn.Linear(dim, dim)   # replace with nn.Linear(dim, dim) if needed
+            self.text_projection   = nn.Linear(dim, dim)   # same as above
 
             self.preprocess = preprocess
             self.tokenize = lambda s: s
