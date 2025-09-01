@@ -2,6 +2,7 @@
 
 import torch, contextlib
 import torch.nn.functional as F
+import torch.nn as nn
 from typing import Sequence
 from PIL import Image
 from medclip import MedCLIPProcessor, MedCLIPVisionModelViT, MedCLIPVisionModel
@@ -84,6 +85,11 @@ def build_medclip(device: str = "cpu", backbone: str = "vit") -> "VLPack":
             self.dim = dim
             self.name = f"MedCLIP-{backbone.upper()}-noProj"
             self.device = torch.device(device)
+
+            out_dim = dim
+            self.model.visual_projection = nn.Linear(dim, out_dim, bias=False).to(device)
+            self.model.text_projection   = nn.Linear(dim, out_dim, bias=False).to(device)
+
 
         @torch.no_grad()
         def encode_text(self, texts: Sequence[str]) -> torch.Tensor:

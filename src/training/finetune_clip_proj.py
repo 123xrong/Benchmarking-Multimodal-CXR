@@ -284,6 +284,7 @@ def finetune_medclip_projection(
     if hasattr(model, "visual_projection"):
         for p in model.visual_projection.parameters():
             p.requires_grad = True; train_params.append(p)
+            print(sum(p.numel() for p in model.visual_projection.parameters()), "params in visual_projection")
     if train_text and hasattr(model, "text_projection"):
         for p in model.text_projection.parameters():
             p.requires_grad = True; train_params.append(p)
